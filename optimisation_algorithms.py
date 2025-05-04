@@ -50,7 +50,7 @@ def constrained_convex_problem_cvxpy(P: np.array, lambda1: float, n: int, chebys
 
 	before_stamp = time.time()
 	# Solve the problem
-	problem.solve()
+	problem.solve(max_iter=10000000)
 	timer = time.time() - before_stamp
 
 	return x.value.tolist(), timer
@@ -58,13 +58,14 @@ def constrained_convex_problem_cvxpy(P: np.array, lambda1: float, n: int, chebys
 
 class ProjectedGradientDescent:
 	"""docstring for ProjectedGradientDescent"""
-	def __init__(self, lambda1, chebyshev=False, epsilon=1e-6):
+	def __init__(self, lambda1, chebyshev=False, epsilon=1e-6, max_iter_count = None):
 		super(ProjectedGradientDescent, self).__init__()
 
 		self.chebyshev = chebyshev
 		self.lambda1 = lambda1
 		self.lambda2 = 1 - lambda1
 		self.epsilon = epsilon
+		self.max_iter_count = max_iter_count
 
 	def set_data(self, P: np.array):
 		self.mu = np.mean(P, axis=0)
@@ -75,15 +76,42 @@ class ProjectedGradientDescent:
 		# Lipschitz constant L = 2*(λ2)*λ_max(Σ)
 		eigs       = np.linalg.eigvalsh(self.cov_matrix)
 		lambda_max = eigs[-1]
-		self.L     = 2 * (self.lambda2) * lambda_max
+		# self.L     = 2 * (self.lambda2) * lambda_max
 
-		# choose the optimal step-size
-		self.learning_rate = 1.0 / self.L
+		# # choose the optimal step-size
+		# self.learning_rate = 1.0 / self.L
 
-		self.max_iter = math.ceil((self.L * 2)/self.epsilon) + 100
+		# self.max_iter = math.ceil((self.L * 2)/self.epsilon) + 100
+
+		# print("Number of iterations for convergence : ", math.ceil((self.L * 2)/self.epsilon))
 
 		self.f_star_return = np.min(-self.mu)  # Ideal expected return (best possible return)
 		self.f_star_variance = np.min(np.diag(self.cov_matrix))  # Ideal variance (best possible variance)
+
+		if not self.chebyshev:
+		    # smooth weighted‐sum
+		    self.L            = 2 * self.lambda2 * lambda_max
+		    self.learning_rate = 1.0 / self.L
+		    # O(1/ε) iterations
+		    self.max_iter      = math.ceil((self.L * 2) / self.epsilon) + 100
+		    print(f"[WS] L={self.L:.3g}, max_iter≈{self.max_iter}")
+		else:
+		    # nonsmooth Chebyshev
+		    L1 = self.lambda1 * np.linalg.norm(self.mu)
+		    L2 = 2 * self.lambda2 * lambda_max
+		    # Lipschitz constant for the max of two abs‐functions
+		    self.L_cheb       = max(L1, L2)
+		    # base step‐size
+		    self.alpha0       = 1.0 / self.L_cheb
+		    self.learning_rate = self.alpha0
+		    # O(1/ε^2) iterations
+		    print("epsilon ", self.epsilon)
+		    print("self.L_cheb / self.epsilon ", self.L_cheb / self.epsilon)
+		    print("math.ceil((self.L_cheb / self.epsilon)**2) ", math.ceil((self.L_cheb / self.epsilon)**2))
+		    self.max_iter     = math.ceil((self.L_cheb / self.epsilon)**2) + 1000
+		    print(f"[Ch] L_cheb={self.L_cheb:.3g}, max_iter≈{self.max_iter}")
+
+		    if self.max_iter_count != None: self.max_iter = self.max_iter_count
 
 	def compute_chebyshev_gradient(self, x):
 
@@ -161,20 +189,29 @@ class ProjectedGradientDescent:
 		x = np.ones(len(self.mu)) / len(self.mu)  # Start with equal weights
 		
 		before_stamp = time.time()
+
+		t_grad = 0
+		t_projection = 0
 		# Iteratively update portfolio weights
 		for iter in range(self.max_iter):
 
 			if not self.chebyshev:
 				# Compute the weighted sum gradient of the objective function
+				t_stamp_grad = time.time()
 				grad = self.compute_gradient(x)
+				t_grad = t_grad + time.time() - t_stamp_grad
 			else:
+				t_stamp_grad = time.time()
 				# Compute the chebyshev gradient of the objective function
 				grad = self.compute_chebyshev_gradient(x)
+				t_grad = t_grad + time.time() - t_stamp_grad
 			# Update the portfolio weights using gradient descent
 			x_new = x - self.learning_rate * grad
 			
+			t_stamp_proj = time.time()
 			# Project the updated weights back onto the feasible set
 			x_new = self.project(x_new)
+			t_projection = t_projection + time.time() - t_stamp_proj
 			
 			# Check for convergence (if the change in weights is small enough)
 			if np.linalg.norm(x_new - x) < self.epsilon:
